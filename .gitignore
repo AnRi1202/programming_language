@@ -1,0 +1,8 @@
+jl/*
+ml/*
+rs/*
+**/__pycache__
+*.ipynb
+
+.DS_Store
+*.sqlite
