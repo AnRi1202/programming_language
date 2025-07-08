@@ -20,17 +20,23 @@ func ast_to_asm_function(fun *DefFun) string {
 	asm := fmt.Sprintf(".globl %s\n", fun.name)
 	asm += fmt.Sprintf("%s:\n", fun.name)
 
+	// paramsから引数名リストを作成
+	paramNames := make([]string, len(fun.params))
+	for i, decl := range fun.params {
+		paramNames[i] = decl.name
+	}
+
 	// 関数の本体を処理
-	asm += ast_to_asm_stmt(fun.body)
+	asm += ast_to_asm_stmt(fun.body, paramNames)
 
 	return asm
 }
 
-func ast_to_asm_stmt(stmt Stmt) string {
+func ast_to_asm_stmt(stmt Stmt, params []string) string {
 	switch s := stmt.(type) {
 	case *StmtReturn:
-		// return文: 式を評価してraxに格納
-		asm := ast_to_asm_expr(s.expr)
+		// return文: 式を評価してx0に格納
+		asm := ast_to_asm_expr(s.expr, params)
 		asm += "\tret\n"
 		return asm
 	case *StmtCompound:
@@ -40,7 +46,7 @@ func ast_to_asm_stmt(stmt Stmt) string {
 			asm += ast_to_asm_decl(decl)
 		}
 		for _, stmt := range s.stmts {
-			asm += ast_to_asm_stmt(stmt)
+			asm += ast_to_asm_stmt(stmt, params)
 		}
 		return asm
 	default:
@@ -48,26 +54,30 @@ func ast_to_asm_stmt(stmt Stmt) string {
 	}
 }
 
-func ast_to_asm_expr(expr Expr) string {
+func ast_to_asm_expr(expr Expr, params []string) string {
 	switch e := expr.(type) {
 	case *ExprIntLiteral:
-		// 整数リテラル: raxに即値ロード
-		return fmt.Sprintf("\tmovq $%d, %%rax\n", e.val)
+		// 整数リテラル: x0に即値ロード
+		return fmt.Sprintf("\tmov x0, #%d\n", e.val)
 	case *ExprId:
-		// 変数参照: パラメータはrdi, rsi, rdx, rcx, r8, r9の順
-		paramIndex := get_param_index(e.name)
-		if paramIndex >= 0 {
+		// 変数参照: パラメータはx0, x1, ... x7, それ以降はスタック
+		paramIndex := get_param_index(e.name, params)
+		if paramIndex >= 0 && paramIndex <= 7 {
 			reg := get_param_register(paramIndex)
-			return fmt.Sprintf("\tmovq %%%s, %%rax\n", reg)
+			return fmt.Sprintf("\tmov x0, %s\n", reg)
+		} else if paramIndex >= 8 && paramIndex <= 11 {
+			// ARM64 ABI: 8番目以降はspからロード。sp+0, sp+8, ...
+			offset := 8 * (paramIndex - 8)
+			return fmt.Sprintf("\tldr x0, [sp, #%d]\n", offset)
 		}
 		return ""
 	case *ExprOp:
 		if len(e.args) == 1 {
 			// 単項演算
-			return ast_to_asm_unary_op(e.op, e.args[0])
+			return ast_to_asm_unary_op(e.op, e.args[0], params)
 		} else if len(e.args) == 2 {
 			// 二項演算
-			return ast_to_asm_binary_op(e.op, e.args[0], e.args[1])
+			return ast_to_asm_binary_op(e.op, e.args[0], e.args[1], params)
 		}
 		return ""
 	default:
@@ -75,32 +85,51 @@ func ast_to_asm_expr(expr Expr) string {
 	}
 }
 
-func ast_to_asm_unary_op(op string, arg Expr) string {
-	asm := ast_to_asm_expr(arg)
+func ast_to_asm_unary_op(op string, arg Expr, params []string) string {
+	asm := ast_to_asm_expr(arg, params)
 	switch op {
 	case "-":
-		asm += "\tnegq %%rax\n"
+		asm += "\tneg x0, x0\n"
+	case "!":
+		asm += "\tcmp x0, #0\n"
+		asm += "\tcset x0, eq\n"
 	}
 	return asm
 }
 
-func ast_to_asm_binary_op(op string, left, right Expr) string {
-	asm := ast_to_asm_expr(left)
-	asm += "\tpushq %%rax\n" // 左辺をスタックに保存
-	asm += ast_to_asm_expr(right)
-	asm += "\tmovq %%rax, %%rcx\n" // 右辺をrcxに保存
-	asm += "\tpopq %%rax\n"        // 左辺をraxに復元
-
+func ast_to_asm_binary_op(op string, left, right Expr, params []string) string {
+	asm := ast_to_asm_expr(left, params)
+	asm += "\tstr x0, [sp, #-16]!\n" // 左辺をpush
+	asm += ast_to_asm_expr(right, params)
+	asm += "\tmov x1, x0\n"        // 右辺をx1に
+	asm += "\tldr x0, [sp], #16\n" // 左辺をpopしてx0に
 	switch op {
 	case "+":
-		asm += "\taddq %%rcx, %%rax\n"
+		asm += "\tadd x0, x0, x1\n"
 	case "-":
-		asm += "\tsubq %%rcx, %%rax\n"
+		asm += "\tsub x0, x0, x1\n"
 	case "*":
-		asm += "\timulq %%rcx, %%rax\n"
+		asm += "\tmul x0, x0, x1\n"
 	case "/":
-		asm += "\tcqto\n"        // raxを符号拡張
-		asm += "\tidivq %%rcx\n" // rax = rax / rcx
+		asm += "\tsdiv x0, x0, x1\n"
+	case "==":
+		asm += "\tcmp x0, x1\n"
+		asm += "\tcset x0, eq\n"
+	case "!=":
+		asm += "\tcmp x0, x1\n"
+		asm += "\tcset x0, ne\n"
+	case "<":
+		asm += "\tcmp x0, x1\n"
+		asm += "\tcset x0, lt\n"
+	case "<=":
+		asm += "\tcmp x0, x1\n"
+		asm += "\tcset x0, le\n"
+	case ">":
+		asm += "\tcmp x0, x1\n"
+		asm += "\tcset x0, gt\n"
+	case ">=":
+		asm += "\tcmp x0, x1\n"
+		asm += "\tcset x0, ge\n"
 	}
 	return asm
 }
@@ -111,26 +140,29 @@ func ast_to_asm_decl(decl *Decl) string {
 	return ""
 }
 
-// パラメータ名からインデックスを取得（簡易版）
-func get_param_index(name string) int {
-	// テストケースでは x, y, z などの単純な名前
-	switch name {
-	case "x":
-		return 0
-	case "y":
-		return 1
-	case "z":
-		return 2
-	default:
-		return -1
+// パラメータ名からインデックスを取得（params順）
+func get_param_index(name string, params []string) int {
+	for i, n := range params {
+		if n == name {
+			return i
+		}
 	}
+	// a0, a1, ... のような引数名にも対応
+	if len(name) >= 2 && name[0] == 'a' {
+		for i := 0; i <= 11; i++ {
+			if name == fmt.Sprintf("a%d", i) {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // パラメータインデックスからレジスタ名を取得
 func get_param_register(index int) string {
-	registers := []string{"rdi", "rsi", "rdx", "rcx", "r8", "r9"}
+	registers := []string{"x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11"}
 	if index >= 0 && index < len(registers) {
 		return registers[index]
 	}
-	return "rdi" // デフォルト
+	return "x0" // デフォルト
 }

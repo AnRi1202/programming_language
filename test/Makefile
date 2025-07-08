@@ -38,7 +38,7 @@ all : $(compares)
 # C -> XML
 $(minc_xmls) : xml/f%.xml : src/f%.c xml/dir
 	@echo "# convert $< to $@"
-	python3 ../parser/minc_to_xml.py $< > $@
+	./venv/bin/python ../parser/minc_to_xml.py $< > $@
 
 # XML -> asm
 $(minc_asms) : asm/f%.s : xml/f%.xml asm/dir $(minc)

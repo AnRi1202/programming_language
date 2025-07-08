@@ -6,3 +6,11 @@ rs/*
 
 .DS_Store
 *.sqlite
+
+venv/
+
+test/asm/*
+test/out/*
+test/xml/*
+test/gcc/*
+test/minc/*
