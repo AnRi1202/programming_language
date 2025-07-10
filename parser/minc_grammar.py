@@ -138,14 +138,16 @@ class minCParser(Parser):
             with self._option():
                 self._while_stmt_()
             with self._option():
+                self._for_stmt_()
+            with self._option():
                 self._expr_()
                 self._token(';')
             self._error(
                 'expecting one of: '
-                "';' 'break' 'continue' 'if' 'return'"
-                "'while' '{' <compound_stmt>"
-                '<equality_expr> <expr> <if_stmt>'
-                '<while_stmt>'
+                "';' 'break' 'continue' 'for' 'if'"
+                "'return' 'while' '{' <compound_stmt>"
+                '<equality_expr> <expr> <for_stmt>'
+                '<if_stmt> <while_stmt>'
             )
 
     @tatsumasu()
@@ -370,6 +372,54 @@ class minCParser(Parser):
     @tatsumasu()
     def _identifier_(self):
         self._pattern('[A-Za-z_][A-Za-z_0-9]*')
+
+    @tatsumasu()
+    def _for_stmt_(self):
+        self._token('for')
+        self._token('(')
+        self._for_init_()
+        self._token(';')
+        self._for_cond_()
+        self._token(';')
+        self._for_post_()
+        self._token(')')
+        self._stmt_()
+
+    @tatsumasu()
+    def _for_init_(self):
+        with self._choice():
+            with self._option():
+                self._expr_()
+            with self._option():
+                self._empty_closure()
+            self._error(
+                'expecting one of: '
+                '<cmp_expr> <equality_expr> <expr>'
+            )
+
+    @tatsumasu()
+    def _for_cond_(self):
+        with self._choice():
+            with self._option():
+                self._expr_()
+            with self._option():
+                self._empty_closure()
+            self._error(
+                'expecting one of: '
+                '<cmp_expr> <equality_expr> <expr>'
+            )
+
+    @tatsumasu()
+    def _for_post_(self):
+        with self._choice():
+            with self._option():
+                self._expr_()
+            with self._option():
+                self._empty_closure()
+            self._error(
+                'expecting one of: '
+                '<cmp_expr> <equality_expr> <expr>'
+            )
 
 
 def main(filename, **kwargs):

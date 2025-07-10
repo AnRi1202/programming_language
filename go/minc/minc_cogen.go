@@ -308,6 +308,20 @@ func (cg *CodeGen) genStmt(stmt Stmt, params []string, localVars *LocalVars) {
 
 	case *StmtExpr:
 		cg.genExpr(s.expr, params, localVars)
+	case *StmtFor:
+		c := cg.count()
+		// 初期化
+		cg.genStmt(s.init, params, localVars)
+
+		cg.println(".L.begin.%d:", c)         // ループ条件判定位置
+		cg.genExpr(s.cond, params, localVars) // cond
+		cg.cmpZero(8)
+		cg.println("  beq .L.end.%d", c) // false で脱出
+
+		cg.genStmt(s.body, params, localVars) // body
+		cg.genStmt(s.post, params, localVars) // post
+		cg.println("  b .L.begin.%d", c)      // 再判定へ
+		cg.println(".L.end.%d:", c)
 	}
 }
 

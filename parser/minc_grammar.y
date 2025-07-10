@@ -47,6 +47,7 @@ stmt =
   | compound_stmt               # { ... }
   | if_stmt                     # if
   | while_stmt                  # while
+  | for_stmt                    # for
   | expr ";"                    # expression (e.g., f(x))
   ;
 
@@ -119,3 +120,30 @@ arg_list =
 
 number = /\d+/ ;
 identifier = /[A-Za-z_][A-Za-z_0-9]*/ ;
+
+# ------------------------------------------------------------
+#  for 文
+#      for ( init ; cond ; post ) body
+#  仕様を最小に保つため、
+#   * init / post は「空」または式（代入式を含む）
+#   * cond は「空」または式（空なら true とみなす）
+#   * 宣言付き for (long i = 0; …) は未対応
+# ------------------------------------------------------------
+
+for_stmt =
+  "for" "(" for_init ";" for_cond ";" for_post ")" stmt
+  ;
+for_init =
+  | expr    # 代入式など
+  | {}      # 空
+  ;
+
+for_cond =
+  | expr
+  | {}      # 空 = 常に真として振る舞う
+  ;
+
+for_post =
+  | expr
+  | {}      # 空
+  ;

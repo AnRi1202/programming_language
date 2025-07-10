@@ -234,6 +234,22 @@ def xml_of_ast_stmt(stmt):
         assert((while_, lparen, rparen) == ("while", "(", ")")), stmt
         return node("while", [node("cond", [xml_of_ast_expr(cond)]),
                               node("body", [xml_of_ast_stmt(body)])])
+    if fst == "for":
+        # 9-tuple: ('for','(',init,';',cond,';',post,')',body)
+        (for_kw, lpar, init, sc1, cond, sc2, post, rpar, body) = stmt
+        assert((for_kw, lpar, sc1, sc2, rpar) == ("for", "(", ";", ";", ")")), stmt
+
+        # 空の場合は <empty/>、式がある場合は <expr_stmt> に統一
+        def stmt_from_expr(e):
+            return node("empty", []) if e == () else node("expr_stmt", [xml_of_ast_expr(e)])
+
+        return node("for", [
+            node("init", [stmt_from_expr(init)]),
+            node("cond", [xml_of_ast_expr(cond)] if cond != () else []),
+            node("post", [stmt_from_expr(post)]),
+            node("body", [xml_of_ast_stmt(body)])
+        ])
+        
     (expr, semi_colon) = stmt
     assert(semi_colon == ";"), stmt
     return node("expr_stmt", [xml_of_ast_expr(expr)])

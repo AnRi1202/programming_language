@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#if 0 <= TEST_NO && TEST_NO <= 74
+#if 0 <= TEST_NO && TEST_NO <= 99
 enum { max_args = 12 };
 
 long f(long, long, long, long, long, long,
