@@ -125,6 +125,11 @@ type StmtFor struct {
 	body Stmt // ループ本体
 }
 
+type StmtDeclInit struct {
+	decl *Decl // 変数名など
+	init Expr  // 初期値
+}
+
 /* convert ast back to C string
 
    ast_to_str_xxx converts an AST to a string
@@ -287,3 +292,7 @@ func (prog *Program) ast_to_str_program() string {
 	return concat("\n", map_array(func(def Def) string { return def.ast_to_str_def() }, prog.defs))
 }
 func (s *StmtEmpty) ast_to_str_stmt() string { return ";" }
+
+func (s *StmtDeclInit) ast_to_str_stmt() string {
+	return fmt.Sprintf("%s = %s;", s.decl.name, s.init.ast_to_str_expr())
+}

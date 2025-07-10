@@ -196,6 +196,20 @@ def xml_of_ast_stmt(stmt):
         </call>
        </expr_stmt>
     """
+    # -------------------------------------------------
+    # ❶ 先頭で “宣言＋初期化” を捕まえる
+    #     tup = (type, name, '=', expr, ';')
+    # -------------------------------------------------
+    if len(stmt) == 5 and stmt[2] == '=' and stmt[4] == ';':
+        var_type, var_name, _, init_expr, _ = stmt
+        decl_xml = xml_of_ast_decl((var_type, var_name, ';'))
+        return node('decl_init', [
+            decl_xml,
+            node('init', [xml_of_ast_expr(init_expr)])
+        ])
+    # -------------------------------------------------
+    # ❷ 以下は既存の分岐――変更なし
+    # ------------------------------------------------- 
     fst = stmt[0]
     if fst == ";":
         assert(stmt == (";",)), stmt
@@ -249,6 +263,9 @@ def xml_of_ast_stmt(stmt):
             node("post", [stmt_from_expr(post)]),
             node("body", [xml_of_ast_stmt(body)])
         ])
+
+
+
         
     (expr, semi_colon) = stmt
     assert(semi_colon == ";"), stmt

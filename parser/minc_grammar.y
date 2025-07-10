@@ -48,6 +48,7 @@ stmt =
   | if_stmt                     # if
   | while_stmt                  # while
   | for_stmt                    # for
+  | decl_init_stmt              # long z = expr ;
   | expr ";"                    # expression (e.g., f(x))
   ;
 
@@ -146,4 +147,8 @@ for_cond =
 for_post =
   | expr
   | {}      # 空
+  ;
+
+decl_init_stmt =
+  type_expr identifier "=" expr ";"
   ;

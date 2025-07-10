@@ -140,14 +140,17 @@ class minCParser(Parser):
             with self._option():
                 self._for_stmt_()
             with self._option():
+                self._decl_init_stmt_()
+            with self._option():
                 self._expr_()
                 self._token(';')
             self._error(
                 'expecting one of: '
-                "';' 'break' 'continue' 'for' 'if'"
+                "';' 'break' 'continue' 'for' 'if' 'long'"
                 "'return' 'while' '{' <compound_stmt>"
-                '<equality_expr> <expr> <for_stmt>'
-                '<if_stmt> <while_stmt>'
+                '<decl_init_stmt> <equality_expr> <expr>'
+                '<for_stmt> <if_stmt> <type_expr>'
+                '<while_stmt>'
             )
 
     @tatsumasu()
@@ -420,6 +423,14 @@ class minCParser(Parser):
                 'expecting one of: '
                 '<cmp_expr> <equality_expr> <expr>'
             )
+
+    @tatsumasu()
+    def _decl_init_stmt_(self):
+        self._type_expr_()
+        self._identifier_()
+        self._token('=')
+        self._expr_()
+        self._token(';')
 
 
 def main(filename, **kwargs):

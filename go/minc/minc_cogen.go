@@ -322,6 +322,13 @@ func (cg *CodeGen) genStmt(stmt Stmt, params []string, localVars *LocalVars) {
 		cg.genStmt(s.post, params, localVars) // post
 		cg.println("  b .L.begin.%d", c)      // 再判定へ
 		cg.println(".L.end.%d:", c)
+
+	case *StmtDeclInit:
+		cg.genExpr(s.init, params, localVars) // 初期値計算 → x0
+		if off, ok := localVars.getOffset(s.decl.name); ok {
+			actual := len(params)*8 + off - 8
+			cg.emitStore("x0", "sp", actual) // スタックに保存
+		}
 	}
 }
 
@@ -442,5 +449,9 @@ func collectDecls(st Stmt, lv *LocalVars) {
 		}
 	case *StmtWhile:
 		collectDecls(s.body, lv)
+	case *StmtFor:
+		collectDecls(s.body, lv)
+	case *StmtDeclInit:
+		lv.addVariable(s.decl.name)
 	}
 }

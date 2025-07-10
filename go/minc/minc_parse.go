@@ -315,6 +315,13 @@ func dom_to_ast_stmt(elem *xmldom.Node) Stmt {
 			body := dom_to_ast_stmt(check_get_child_1(bodyElem))
 			return &StmtFor{init, cond, post, body}
 		}
+	case "decl_init":
+		{ // <decl_init>...</decl_init>
+			declElem, initElem := check_get_children_2(elem, "decl", "init")
+			d := dom_to_ast_decl(declElem) // そのまま渡す
+			initExpr := dom_to_ast_expr(check_get_child_1(initElem))
+			return &StmtDeclInit{d, initExpr}
+		}
 	}
 	invalid_xml(elem)
 	return nil
