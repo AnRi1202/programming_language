@@ -10,6 +10,7 @@ type CodeGen struct {
 	output     string
 	depth      int
 	labelCount int
+	frameSize  int
 }
 
 func newCodeGen() *CodeGen {
@@ -58,15 +59,15 @@ func (lv *LocalVars) getOffset(name string) (int, bool) {
 // スタック操作
 func (cg *CodeGen) push() {
 	// 一時的なスタック領域（パラメータ+ローカル変数の後）を使用
-	offset := 128 + 16*cg.depth // 128バイト以降を一時領域として使用
-	cg.println("  str x0, [sp, #%d]", offset)
+	offset := 128 + 16*cg.depth
+	cg.emitStore("x0", "sp", offset)
 	cg.depth++
 }
 
 func (cg *CodeGen) pop(reg string) {
 	cg.depth--
 	offset := 128 + 16*cg.depth
-	cg.println("  ldr %s, [sp, #%d]", reg, offset)
+	cg.emitLoad(reg, "sp", offset)
 }
 
 // アライメント関数
@@ -103,9 +104,7 @@ func (cg *CodeGen) genAddr(expr Expr, params []string, localVars *LocalVars) {
 		// 変数のアドレス
 		paramIndex := getParamIndex(e.name, params)
 		if paramIndex >= 0 && paramIndex <= 7 {
-			total := len(params)*8 + localVars.stackSize + 256
-			aligned := alignTo(total, 16)
-			offset := paramIndex*8 - aligned
+			offset := paramIndex*8 - cg.frameSize
 			if offset < 0 {
 				cg.println("  sub x0, x29, #%d", -offset)
 			} else {
@@ -117,10 +116,19 @@ func (cg *CodeGen) genAddr(expr Expr, params []string, localVars *LocalVars) {
 		} else {
 			// ローカル変数
 			if offset, exists := localVars.getOffset(e.name); exists {
-				if offset < 0 {
-					cg.println("  sub x0, sp, #%d", -offset)
-				} else {
-					cg.println("  add x0, sp, #%d", offset)
+				if offset >= -4095 && offset <= 4095 {
+					if offset < 0 {
+						cg.println("  sub x0, sp, #%d", -offset)
+					} else {
+						cg.println("  add x0, sp, #%d", offset)
+					}
+				} else { // 即値範囲外はレジスタ経由
+					if offset < 0 {
+						cg.println("  sub x9, sp, #%d", -offset)
+					} else {
+						cg.println("  add x9, sp, #%d", offset)
+					}
+					cg.println("  mov x0, x9")
 				}
 			}
 		}
@@ -223,8 +231,7 @@ func (cg *CodeGen) pushArgs(args []Expr, params []string, localVars *LocalVars) 
 		cg.println("  sub sp, sp, #%d", stackArgSize)
 		for i := 8; i < len(args); i++ {
 			cg.genExpr(args[i], params, localVars)
-			offset := (i - 8) * 8
-			cg.println("  str x0, [sp, #%d]", offset)
+			cg.emitStore("x0", "sp", (i-8)*8)
 			stackArgs++
 		}
 	}
@@ -267,9 +274,8 @@ func (cg *CodeGen) genExpr(expr Expr, params []string, localVars *LocalVars) {
 		// 変数参照
 		paramIndex := getParamIndex(e.name, params)
 		if paramIndex >= 0 && paramIndex <= 7 {
-			total := len(params)*8 + localVars.stackSize + 256
-			aligned := alignTo(total, 16)
-			cg.emitLoad("x0", "x29", paramIndex*8-aligned)
+			fixed := paramIndex*8 - cg.frameSize
+			cg.emitLoad("x0", "x29", fixed)
 		} else if paramIndex >= 8 && paramIndex <= 11 {
 			// x29 はスタックフレーム基準。16 は prologue の push 分
 			offset := 16 + 8*(paramIndex-8)
@@ -493,8 +499,6 @@ func (cg *CodeGen) genStmt(stmt Stmt, params []string, localVars *LocalVars) {
 
 // 宣言のコード生成
 func (cg *CodeGen) genDecl(decl *Decl, localVars *LocalVars) {
-	// ローカル変数の宣言は既にスタックオフセットが計算済み
-	// 現在のminCでは初期化はサポートされていない
 }
 
 // 関数のコード生成
@@ -505,18 +509,8 @@ func (cg *CodeGen) genFunction(fun *DefFun) {
 		paramNames[i] = decl.name
 	}
 
-	// ローカル変数管理を初期化
 	localVars := newLocalVars()
-
-	// ローカル変数を処理
-	var localDecls []*Decl
-	if body, ok := fun.body.(*StmtCompound); ok {
-		localDecls = body.decls
-	}
-
-	for _, decl := range localDecls {
-		localVars.addVariable(decl.name)
-	}
+	collectDecls(fun.body, localVars)
 
 	// 関数の開始
 	cg.println(".globl %s", fun.name)
@@ -531,6 +525,7 @@ func (cg *CodeGen) genFunction(fun *DefFun) {
 	// 一時的なスタック操作のためにさらに256バイト確保
 	totalStackSize := len(paramNames)*8 + localVars.stackSize + 256
 	alignedSize := alignTo(totalStackSize, 16)
+	cg.frameSize = alignedSize
 	cg.println("  sub sp, sp, #%d", alignedSize)
 
 	// パラメータをスタックに保存
@@ -538,7 +533,7 @@ func (cg *CodeGen) genFunction(fun *DefFun) {
 		if i < 8 {
 			reg := getParamRegister(i)
 			offset := i * 8
-			cg.println("  str %s, [sp, #%d]", reg, offset)
+			cg.emitStore(reg, "sp", offset)
 		}
 	}
 
@@ -659,5 +654,25 @@ func (cg *CodeGen) emitStore(src, base string, offset int) {
 			cg.println("  add x9, %s, #%d", base, offset)
 		}
 		cg.println("  str %s, [x9]", src)
+	}
+}
+
+// --- ファイル末尾でも package 直下でも OK ---
+func collectDecls(st Stmt, lv *LocalVars) {
+	switch s := st.(type) {
+	case *StmtCompound:
+		for _, d := range s.decls {
+			lv.addVariable(d.name)
+		}
+		for _, sub := range s.stmts {
+			collectDecls(sub, lv)
+		}
+	case *StmtIf:
+		collectDecls(s.then_stmt, lv)
+		if s.else_stmt != nil {
+			collectDecls(s.else_stmt, lv)
+		}
+	case *StmtWhile:
+		collectDecls(s.body, lv)
 	}
 }
