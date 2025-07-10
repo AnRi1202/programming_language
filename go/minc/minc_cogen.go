@@ -207,21 +207,21 @@ func (cg *CodeGen) cast(fromSize, toSize int, fromUnsigned, toUnsigned bool) {
 // 関数呼び出しの引数処理
 func (cg *CodeGen) pushArgs(args []Expr, params []string, localVars *LocalVars) int {
 	stackArgs := 0
-	gpCount := 0
 
-	// 引数を右から左に評価
-	for i := len(args) - 1; i >= 0; i-- {
+	// 引数を左から右に評価してスタックに一時保存
+	for i := 0; i < len(args); i++ {
 		cg.genExpr(args[i], params, localVars)
+		cg.push()
+	}
 
-		// 引数の型に応じてレジスタまたはスタックに配置
-		if gpCount < 8 {
+	// スタックから引数を取り出してレジスタに配置
+	for i := len(args) - 1; i >= 0; i-- {
+		if i < 8 {
 			// 汎用レジスタに配置
-			reg := fmt.Sprintf("x%d", gpCount)
-			cg.println("  mov %s, x0", reg)
-			gpCount++
+			reg := fmt.Sprintf("x%d", i)
+			cg.pop(reg)
 		} else {
-			// スタックに配置
-			cg.push()
+			// スタックに配置（そのまま残す）
 			stackArgs++
 		}
 	}
@@ -400,11 +400,15 @@ func (cg *CodeGen) genFunctionCall(call *ExprCall, params []string, localVars *L
 	// 引数を処理
 	stackArgs := cg.pushArgs(call.args, params, localVars)
 
-	// 関数を評価
-	cg.genExpr(call.fun, params, localVars)
-
-	// 関数呼び出し
-	cg.println("  blr x0")
+	// 関数名を取得
+	if funId, ok := call.fun.(*ExprId); ok {
+		// 直接関数名を指定して呼び出し
+		cg.println("  bl %s", funId.name)
+	} else {
+		// 間接呼び出し（関数ポインタなど）
+		cg.genExpr(call.fun, params, localVars)
+		cg.println("  blr x0")
+	}
 
 	// スタックを復元
 	if stackArgs > 0 {
