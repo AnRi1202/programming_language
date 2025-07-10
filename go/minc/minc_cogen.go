@@ -207,12 +207,17 @@ func (cg *CodeGen) cast(fromSize, toSize int, fromUnsigned, toUnsigned bool) {
 // 関数呼び出しの引数処理
 func (cg *CodeGen) pushArgs(args []Expr, params []string, localVars *LocalVars) int {
 	stackArgs := 0
-
-	// 9番目以降の引数を逆順でスタックに配置（実際のスタックに）
-	for i := len(args) - 1; i >= 8; i-- {
-		cg.genExpr(args[i], params, localVars)
-		cg.println("  str x0, [sp, #-16]!")
-		stackArgs++
+	stackArgNum := 0
+	if len(args) > 8 {
+		stackArgNum = len(args) - 8
+		stackArgSize := stackArgNum * 8
+		cg.println("  sub sp, sp, #%d", stackArgSize)
+		for i := 8; i < len(args); i++ {
+			cg.genExpr(args[i], params, localVars)
+			offset := (i - 8) * 8
+			cg.println("  str x0, [sp, #%d]", offset)
+			stackArgs++
+		}
 	}
 
 	// 最初の8個の引数をレジスタに配置するため、一時的にスタックに保存
@@ -257,10 +262,8 @@ func (cg *CodeGen) genExpr(expr Expr, params []string, localVars *LocalVars) {
 			offset := paramIndex * 8
 			cg.println("  ldr x0, [sp, #%d]", offset)
 		} else if paramIndex >= 8 && paramIndex <= 11 {
-			// AArch64 ABI: 8番目以降のパラメータはスタックに渡される
-			// 現在のスタックポインタから呼び出し元のスタックフレームまでのオフセット
-			totalStackSize := len(params)*8 + localVars.stackSize + 256
-			alignedSize := alignTo(totalStackSize, 16)
+			// 呼び出し元のsp基準で、呼び出し先フレームの外側にある
+			alignedSize := alignTo(len(params)*8+localVars.stackSize+256, 16)
 			offset := alignedSize + 16 + 8*(paramIndex-8)
 			cg.println("  ldr x0, [sp, #%d]", offset)
 		} else {
@@ -407,7 +410,11 @@ func (cg *CodeGen) genBinaryOp(op string, left, right Expr, params []string, loc
 // 関数呼び出しのコード生成
 func (cg *CodeGen) genFunctionCall(call *ExprCall, params []string, localVars *LocalVars) {
 	// 引数を処理
-	stackArgs := cg.pushArgs(call.args, params, localVars)
+	_ = cg.pushArgs(call.args, params, localVars)
+	stackArgNum := 0
+	if len(call.args) > 8 {
+		stackArgNum = len(call.args) - 8
+	}
 
 	// 関数名を取得
 	if funId, ok := call.fun.(*ExprId); ok {
@@ -420,8 +427,8 @@ func (cg *CodeGen) genFunctionCall(call *ExprCall, params []string, localVars *L
 	}
 
 	// スタックを復元
-	if stackArgs > 0 {
-		cg.println("  add sp, sp, #%d", stackArgs*16)
+	if stackArgNum > 0 {
+		cg.println("  add sp, sp, #%d", stackArgNum*8)
 	}
 }
 
