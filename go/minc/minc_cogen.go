@@ -58,14 +58,14 @@ func (lv *LocalVars) getOffset(name string) (int, bool) {
 // スタック操作
 func (cg *CodeGen) push() {
 	// 一時的なスタック領域（パラメータ+ローカル変数の後）を使用
-	offset := 64 + 16*cg.depth // 64バイト以降を一時領域として使用
+	offset := 128 + 16*cg.depth // 128バイト以降を一時領域として使用
 	cg.println("  str x0, [sp, #%d]", offset)
 	cg.depth++
 }
 
 func (cg *CodeGen) pop(reg string) {
 	cg.depth--
-	offset := 64 + 16*cg.depth
+	offset := 128 + 16*cg.depth
 	cg.println("  ldr %s, [sp, #%d]", reg, offset)
 }
 
@@ -208,25 +208,34 @@ func (cg *CodeGen) cast(fromSize, toSize int, fromUnsigned, toUnsigned bool) {
 func (cg *CodeGen) pushArgs(args []Expr, params []string, localVars *LocalVars) int {
 	stackArgs := 0
 
-	// 引数を左から右に評価してスタックに一時保存
-	for i := 0; i < len(args); i++ {
+	// 9番目以降の引数を逆順でスタックに配置（実際のスタックに）
+	for i := len(args) - 1; i >= 8; i-- {
+		cg.genExpr(args[i], params, localVars)
+		cg.println("  str x0, [sp, #-16]!")
+		stackArgs++
+	}
+
+	// 最初の8個の引数をレジスタに配置するため、一時的にスタックに保存
+	for i := 0; i < len(args) && i < 8; i++ {
 		cg.genExpr(args[i], params, localVars)
 		cg.push()
 	}
 
-	// スタックから引数を取り出してレジスタに配置
-	for i := len(args) - 1; i >= 0; i-- {
-		if i < 8 {
-			// 汎用レジスタに配置
-			reg := fmt.Sprintf("x%d", i)
-			cg.pop(reg)
-		} else {
-			// スタックに配置（そのまま残す）
-			stackArgs++
-		}
+	// レジスタ引数をスタックから取り出してレジスタに配置（逆順）
+	for i := min(len(args), 8) - 1; i >= 0; i-- {
+		reg := fmt.Sprintf("x%d", i)
+		cg.pop(reg)
 	}
 
 	return stackArgs
+}
+
+// min関数のヘルパー
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // 式のコード生成
@@ -250,7 +259,7 @@ func (cg *CodeGen) genExpr(expr Expr, params []string, localVars *LocalVars) {
 		} else if paramIndex >= 8 && paramIndex <= 11 {
 			// AArch64 ABI: 8番目以降のパラメータはスタックに渡される
 			// 現在のスタックポインタから呼び出し元のスタックフレームまでのオフセット
-			totalStackSize := len(params)*8 + localVars.stackSize + 128
+			totalStackSize := len(params)*8 + localVars.stackSize + 256
 			alignedSize := alignTo(totalStackSize, 16)
 			offset := alignedSize + 16 + 8*(paramIndex-8)
 			cg.println("  ldr x0, [sp, #%d]", offset)
@@ -412,7 +421,7 @@ func (cg *CodeGen) genFunctionCall(call *ExprCall, params []string, localVars *L
 
 	// スタックを復元
 	if stackArgs > 0 {
-		cg.println("  add sp, sp, #%d", stackArgs*8)
+		cg.println("  add sp, sp, #%d", stackArgs*16)
 	}
 }
 
@@ -424,7 +433,7 @@ func (cg *CodeGen) genStmt(stmt Stmt, params []string, localVars *LocalVars) {
 			cg.genExpr(s.expr, params, localVars)
 		}
 		// スタックを復元してreturn
-		totalStackSize := len(params)*8 + localVars.stackSize + 128
+		totalStackSize := len(params)*8 + localVars.stackSize + 256
 		alignedSize := alignTo(totalStackSize, 16)
 		cg.println("  add sp, sp, #%d", alignedSize)
 		cg.println("  ldp x29, x30, [sp], #16")
@@ -505,8 +514,8 @@ func (cg *CodeGen) genFunction(fun *DefFun) {
 	cg.println("  mov x29, sp")
 
 	// パラメータとローカル変数のためのスタック領域を確保
-	// 一時的なスタック操作のためにさらに128バイト確保
-	totalStackSize := len(paramNames)*8 + localVars.stackSize + 128
+	// 一時的なスタック操作のためにさらに256バイト確保
+	totalStackSize := len(paramNames)*8 + localVars.stackSize + 256
 	alignedSize := alignTo(totalStackSize, 16)
 	cg.println("  sub sp, sp, #%d", alignedSize)
 
