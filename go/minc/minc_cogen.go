@@ -103,16 +103,25 @@ func (cg *CodeGen) genAddr(expr Expr, params []string, localVars *LocalVars) {
 		// 変数のアドレス
 		paramIndex := getParamIndex(e.name, params)
 		if paramIndex >= 0 && paramIndex <= 7 {
-			// パラメータの場合、レジスタの値をそのまま使用
-			cg.println("  mov x0, %s", getParamRegister(paramIndex))
+			total := len(params)*8 + localVars.stackSize + 256
+			aligned := alignTo(total, 16)
+			offset := paramIndex*8 - aligned
+			if offset < 0 {
+				cg.println("  sub x0, x29, #%d", -offset)
+			} else {
+				cg.println("  add x0, x29, #%d", offset)
+			}
 		} else if paramIndex >= 8 && paramIndex <= 11 {
-			// スタック上のパラメータ
-			offset := 8 * (paramIndex - 8)
-			cg.println("  add x0, sp, #%d", offset)
+			offset := 16 + 8*(paramIndex-8)
+			cg.emitLoad("x0", "x29", offset)
 		} else {
 			// ローカル変数
 			if offset, exists := localVars.getOffset(e.name); exists {
-				cg.println("  add x0, sp, #-%d", offset)
+				if offset < 0 {
+					cg.println("  sub x0, sp, #%d", -offset)
+				} else {
+					cg.println("  add x0, sp, #%d", offset)
+				}
 			}
 		}
 	case *ExprOp:
@@ -210,7 +219,7 @@ func (cg *CodeGen) pushArgs(args []Expr, params []string, localVars *LocalVars) 
 	stackArgNum := 0
 	if len(args) > 8 {
 		stackArgNum = len(args) - 8
-		stackArgSize := stackArgNum * 8
+		stackArgSize := alignTo(stackArgNum*8, 16)
 		cg.println("  sub sp, sp, #%d", stackArgSize)
 		for i := 8; i < len(args); i++ {
 			cg.genExpr(args[i], params, localVars)
@@ -258,20 +267,19 @@ func (cg *CodeGen) genExpr(expr Expr, params []string, localVars *LocalVars) {
 		// 変数参照
 		paramIndex := getParamIndex(e.name, params)
 		if paramIndex >= 0 && paramIndex <= 7 {
-			// パラメータはスタックに保存されているので、そこから取得
-			offset := paramIndex * 8
-			cg.println("  ldr x0, [sp, #%d]", offset)
+			total := len(params)*8 + localVars.stackSize + 256
+			aligned := alignTo(total, 16)
+			cg.emitLoad("x0", "x29", paramIndex*8-aligned)
 		} else if paramIndex >= 8 && paramIndex <= 11 {
-			// 呼び出し元のsp基準で、呼び出し先フレームの外側にある
-			alignedSize := alignTo(len(params)*8+localVars.stackSize+256, 16)
-			offset := alignedSize + 16 + 8*(paramIndex-8)
-			cg.println("  ldr x0, [sp, #%d]", offset)
+			// x29 はスタックフレーム基準。16 は prologue の push 分
+			offset := 16 + 8*(paramIndex-8)
+			cg.emitLoad("x0", "x29", offset)
 		} else {
 			// ローカル変数
 			if offset, exists := localVars.getOffset(e.name); exists {
 				// ローカル変数はパラメータ領域の後に配置
 				actualOffset := len(params)*8 + offset - 8
-				cg.println("  ldr x0, [sp, #%d]", actualOffset)
+				cg.emitLoad("x0", "sp", actualOffset)
 			}
 		}
 
@@ -320,9 +328,8 @@ func (cg *CodeGen) genBinaryOp(op string, left, right Expr, params []string, loc
 			} else {
 				// ローカル変数
 				if offset, exists := localVars.getOffset(leftId.name); exists {
-					// ローカル変数はパラメータ領域の後に配置
 					actualOffset := len(params)*8 + offset - 8
-					cg.println("  str x0, [sp, #%d]", actualOffset)
+					cg.emitStore("x0", "sp", actualOffset)
 					return
 				}
 			}
@@ -428,7 +435,7 @@ func (cg *CodeGen) genFunctionCall(call *ExprCall, params []string, localVars *L
 
 	// スタックを復元
 	if stackArgNum > 0 {
-		cg.println("  add sp, sp, #%d", stackArgNum*8)
+		cg.println("  add sp, sp, #%d", alignTo(stackArgNum*8, 16))
 	}
 }
 
@@ -627,4 +634,30 @@ func ast_to_asm_decl(decl *Decl, localVars *LocalVars) string {
 	cg := newCodeGen()
 	cg.genDecl(decl, localVars)
 	return cg.output
+}
+
+func (cg *CodeGen) emitLoad(dst, base string, offset int) {
+	if offset >= -256 && offset <= 255 {
+		cg.println("  ldr %s, [%s, #%d]", dst, base, offset)
+	} else {
+		if offset < 0 {
+			cg.println("  sub x9, %s, #%d", base, -offset) // x9: 作業レジスタ
+		} else {
+			cg.println("  add x9, %s, #%d", base, offset)
+		}
+		cg.println("  ldr %s, [x9]", dst)
+	}
+}
+
+func (cg *CodeGen) emitStore(src, base string, offset int) {
+	if offset >= -256 && offset <= 255 {
+		cg.println("  str %s, [%s, #%d]", src, base, offset)
+	} else {
+		if offset < 0 {
+			cg.println("  sub x9, %s, #%d", base, -offset)
+		} else {
+			cg.println("  add x9, %s, #%d", base, offset)
+		}
+		cg.println("  str %s, [x9]", src)
+	}
 }
