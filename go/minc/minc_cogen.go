@@ -1,6 +1,33 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+)
+
+// コード生成の状態管理
+type CodeGen struct {
+	output     string
+	depth      int
+	labelCount int
+}
+
+func newCodeGen() *CodeGen {
+	return &CodeGen{
+		output:     "",
+		depth:      0,
+		labelCount: 0,
+	}
+}
+
+func (cg *CodeGen) println(format string, args ...interface{}) {
+	cg.output += fmt.Sprintf(format, args...) + "\n"
+}
+
+func (cg *CodeGen) count() int {
+	cg.labelCount++
+	return cg.labelCount
+}
 
 // ローカル変数のスタックオフセット管理
 type LocalVars struct {
@@ -15,10 +42,11 @@ func newLocalVars() *LocalVars {
 	}
 }
 
+// LocalVarsのaddVariableは0,8,16...と増やす
 func (lv *LocalVars) addVariable(name string) int {
-	offset := lv.stackSize
+	lv.stackSize += 8      // 8バイト（64ビット）確保
+	offset := lv.stackSize // 正の値として保存
 	lv.variables[name] = offset
-	lv.stackSize += 8 // 8バイト（64ビット）確保
 	return offset
 }
 
@@ -27,22 +55,418 @@ func (lv *LocalVars) getOffset(name string) (int, bool) {
 	return offset, exists
 }
 
-func ast_to_asm_program(program *Program) string {
-	if len(program.defs) == 0 {
-		return ""
-	}
-
-	// 最初の関数定義を取得（テストでは1つの関数のみ）
-	def := program.defs[0]
-	if funDef, ok := def.(*DefFun); ok {
-		return ast_to_asm_function(funDef)
-	}
-
-	return ""
+// スタック操作
+func (cg *CodeGen) push() {
+	cg.println("  str x0, [sp, #-16]!")
+	cg.depth++
 }
 
-func ast_to_asm_function(fun *DefFun) string {
-	// paramsから引数名リストを作成
+func (cg *CodeGen) pop(reg string) {
+	cg.println("  ldr %s, [sp], #16", reg)
+	cg.depth--
+}
+
+// アライメント関数
+func alignTo(n, align int) int {
+	return (n + align - 1) / align * align
+}
+
+// レジスタ名の取得
+func getRegName(size int, isUnsigned bool) string {
+	switch size {
+	case 1:
+		if isUnsigned {
+			return "w0"
+		}
+		return "w0"
+	case 2:
+		if isUnsigned {
+			return "w0"
+		}
+		return "w0"
+	case 4:
+		return "w0"
+	case 8:
+		return "x0"
+	default:
+		return "x0"
+	}
+}
+
+// アドレス生成
+func (cg *CodeGen) genAddr(expr Expr, params []string, localVars *LocalVars) {
+	switch e := expr.(type) {
+	case *ExprId:
+		// 変数のアドレス
+		paramIndex := getParamIndex(e.name, params)
+		if paramIndex >= 0 && paramIndex <= 7 {
+			// パラメータの場合、レジスタの値をそのまま使用
+			cg.println("  mov x0, %s", getParamRegister(paramIndex))
+		} else if paramIndex >= 8 && paramIndex <= 11 {
+			// スタック上のパラメータ
+			offset := 8 * (paramIndex - 8)
+			cg.println("  add x0, sp, #%d", offset)
+		} else {
+			// ローカル変数
+			if offset, exists := localVars.getOffset(e.name); exists {
+				cg.println("  add x0, sp, #-%d", offset)
+			}
+		}
+	case *ExprOp:
+		if e.op == "*" && len(e.args) == 1 {
+			// ポインタ参照
+			cg.genExpr(e.args[0], params, localVars)
+		}
+	}
+}
+
+// 値のロード
+func (cg *CodeGen) load(size int, isUnsigned bool) {
+	switch size {
+	case 1:
+		if isUnsigned {
+			cg.println("  ldrb w0, [x0]")
+		} else {
+			cg.println("  ldrsb w0, [x0]")
+		}
+	case 2:
+		if isUnsigned {
+			cg.println("  ldrh w0, [x0]")
+		} else {
+			cg.println("  ldrsh w0, [x0]")
+		}
+	case 4:
+		cg.println("  ldr w0, [x0]")
+	case 8:
+		cg.println("  ldr x0, [x0]")
+	}
+}
+
+// 値のストア
+func (cg *CodeGen) store(size int) {
+	cg.pop("x1") // アドレス
+	switch size {
+	case 1:
+		cg.println("  strb w0, [x1]")
+	case 2:
+		cg.println("  strh w0, [x1]")
+	case 4:
+		cg.println("  str w0, [x1]")
+	case 8:
+		cg.println("  str x0, [x1]")
+	}
+}
+
+// ゼロ比較
+func (cg *CodeGen) cmpZero(size int) {
+	if size <= 4 {
+		cg.println("  cmp w0, #0")
+	} else {
+		cg.println("  cmp x0, #0")
+	}
+}
+
+// 型キャスト
+func (cg *CodeGen) cast(fromSize, toSize int, fromUnsigned, toUnsigned bool) {
+	if fromSize == toSize {
+		return
+	}
+
+	if fromSize < toSize {
+		// 拡張
+		if fromSize == 1 {
+			if fromUnsigned {
+				cg.println("  uxtb w0, w0")
+			} else {
+				cg.println("  sxtb w0, w0")
+			}
+		} else if fromSize == 2 {
+			if fromUnsigned {
+				cg.println("  uxth w0, w0")
+			} else {
+				cg.println("  sxth w0, w0")
+			}
+		} else if fromSize == 4 && toSize == 8 {
+			if fromUnsigned {
+				cg.println("  uxtw x0, w0")
+			} else {
+				cg.println("  sxtw x0, w0")
+			}
+		}
+	} else {
+		// 縮小（上位ビットを切り捨て）
+		if toSize <= 4 {
+			cg.println("  and w0, w0, #0x%x", (1<<(toSize*8))-1)
+		}
+	}
+}
+
+// 関数呼び出しの引数処理
+func (cg *CodeGen) pushArgs(args []Expr, params []string, localVars *LocalVars) int {
+	stackArgs := 0
+	gpCount := 0
+
+	// 引数を右から左に評価
+	for i := len(args) - 1; i >= 0; i-- {
+		cg.genExpr(args[i], params, localVars)
+
+		// 引数の型に応じてレジスタまたはスタックに配置
+		if gpCount < 8 {
+			// 汎用レジスタに配置
+			reg := fmt.Sprintf("x%d", gpCount)
+			cg.println("  mov %s, x0", reg)
+			gpCount++
+		} else {
+			// スタックに配置
+			cg.push()
+			stackArgs++
+		}
+	}
+
+	return stackArgs
+}
+
+// 式のコード生成
+func (cg *CodeGen) genExpr(expr Expr, params []string, localVars *LocalVars) {
+	switch e := expr.(type) {
+	case *ExprIntLiteral:
+		// 整数リテラル
+		if e.val >= 0 && e.val <= 0xFFFF {
+			cg.println("  mov x0, #%d", e.val)
+		} else {
+			cg.println("  mov x0, #%d", e.val)
+		}
+
+	case *ExprId:
+		// 変数参照
+		paramIndex := getParamIndex(e.name, params)
+		if paramIndex >= 0 && paramIndex <= 7 {
+			reg := getParamRegister(paramIndex)
+			cg.println("  mov x0, %s", reg)
+		} else if paramIndex >= 8 && paramIndex <= 11 {
+			// AArch64 ABI: 8番目以降のパラメータはスタックに渡される
+			offset := 16 + 8*(paramIndex-8)
+			cg.println("  ldr x0, [sp, #%d]", offset)
+		} else {
+			// ローカル変数
+			if offset, exists := localVars.getOffset(e.name); exists {
+				// ローカル変数は sp + (offset - 8) の位置に配置
+				actualOffset := offset - 8
+				cg.println("  ldr x0, [sp, #%d]", actualOffset)
+			}
+		}
+
+	case *ExprOp:
+		if len(e.args) == 1 {
+			// 単項演算
+			cg.genUnaryOp(e.op, e.args[0], params, localVars)
+		} else if len(e.args) == 2 {
+			// 二項演算
+			cg.genBinaryOp(e.op, e.args[0], e.args[1], params, localVars)
+		}
+
+	case *ExprCall:
+		// 関数呼び出し
+		cg.genFunctionCall(e, params, localVars)
+	}
+}
+
+// 単項演算のコード生成
+func (cg *CodeGen) genUnaryOp(op string, arg Expr, params []string, localVars *LocalVars) {
+	cg.genExpr(arg, params, localVars)
+
+	switch op {
+	case "-":
+		cg.println("  neg x0, x0")
+	case "!":
+		cg.cmpZero(8)
+		cg.println("  cset x0, eq")
+	case "~":
+		cg.println("  mvn x0, x0")
+	}
+}
+
+// 二項演算のコード生成
+func (cg *CodeGen) genBinaryOp(op string, left, right Expr, params []string, localVars *LocalVars) {
+	switch op {
+	case "=":
+		// 代入
+		cg.genExpr(right, params, localVars)
+		// 左辺のアドレスを計算
+		if leftId, ok := left.(*ExprId); ok {
+			paramIndex := getParamIndex(leftId.name, params)
+			if paramIndex >= 0 && paramIndex <= 7 {
+				// パラメータの場合、代入は無視
+				return
+			} else {
+				// ローカル変数
+				if offset, exists := localVars.getOffset(leftId.name); exists {
+					// ローカル変数は sp + (offset - 8) の位置に配置
+					actualOffset := offset - 8
+					cg.println("  str x0, [sp, #%d]", actualOffset)
+					return
+				}
+			}
+		}
+		return
+
+	default:
+		// その他の演算
+		cg.genExpr(left, params, localVars)
+		cg.push()
+		cg.genExpr(right, params, localVars)
+		cg.println("  mov x1, x0")
+		cg.pop("x0")
+
+		switch op {
+		case "+":
+			cg.println("  add x0, x0, x1")
+		case "-":
+			cg.println("  sub x0, x0, x1")
+		case "*":
+			cg.println("  mul x0, x0, x1")
+		case "/":
+			cg.println("  sdiv x0, x0, x1")
+		case "%":
+			cg.println("  sdiv x2, x0, x1")
+			cg.println("  msub x0, x2, x1, x0")
+		case "<<":
+			cg.println("  lsl x0, x0, x1")
+		case ">>":
+			cg.println("  asr x0, x0, x1")
+		case "&":
+			cg.println("  and x0, x0, x1")
+		case "|":
+			cg.println("  orr x0, x0, x1")
+		case "^":
+			cg.println("  eor x0, x0, x1")
+		case "==":
+			cg.println("  cmp x0, x1")
+			cg.println("  cset x0, eq")
+		case "!=":
+			cg.println("  cmp x0, x1")
+			cg.println("  cset x0, ne")
+		case "<":
+			cg.println("  cmp x0, x1")
+			cg.println("  cset x0, lt")
+		case "<=":
+			cg.println("  cmp x0, x1")
+			cg.println("  cset x0, le")
+		case ">":
+			cg.println("  cmp x0, x1")
+			cg.println("  cset x0, gt")
+		case ">=":
+			cg.println("  cmp x0, x1")
+			cg.println("  cset x0, ge")
+		case "&&":
+			// 論理AND
+			c := cg.count()
+			cg.cmpZero(8)
+			cg.println("  beq .L.false.%d", c)
+			cg.println("  mov x0, x1")
+			cg.cmpZero(8)
+			cg.println("  beq .L.false.%d", c)
+			cg.println("  mov x0, #1")
+			cg.println("  b .L.end.%d", c)
+			cg.println(".L.false.%d:", c)
+			cg.println("  mov x0, #0")
+			cg.println(".L.end.%d:", c)
+		case "||":
+			// 論理OR
+			c := cg.count()
+			cg.cmpZero(8)
+			cg.println("  bne .L.true.%d", c)
+			cg.println("  mov x0, x1")
+			cg.cmpZero(8)
+			cg.println("  bne .L.true.%d", c)
+			cg.println("  mov x0, #0")
+			cg.println("  b .L.end.%d", c)
+			cg.println(".L.true.%d:", c)
+			cg.println("  mov x0, #1")
+			cg.println(".L.end.%d:", c)
+		}
+	}
+}
+
+// 関数呼び出しのコード生成
+func (cg *CodeGen) genFunctionCall(call *ExprCall, params []string, localVars *LocalVars) {
+	// 引数を処理
+	stackArgs := cg.pushArgs(call.args, params, localVars)
+
+	// 関数を評価
+	cg.genExpr(call.fun, params, localVars)
+
+	// 関数呼び出し
+	cg.println("  blr x0")
+
+	// スタックを復元
+	if stackArgs > 0 {
+		cg.println("  add sp, sp, #%d", stackArgs*8)
+	}
+}
+
+// 文のコード生成
+func (cg *CodeGen) genStmt(stmt Stmt, params []string, localVars *LocalVars) {
+	switch s := stmt.(type) {
+	case *StmtReturn:
+		if s.expr != nil {
+			cg.genExpr(s.expr, params, localVars)
+		}
+		// スタックを復元してreturn
+		if localVars.stackSize > 0 {
+			alignedSize := alignTo(localVars.stackSize, 16)
+			cg.println("  add sp, sp, #%d", alignedSize)
+		}
+		cg.println("  ldp x29, x30, [sp], #16")
+		cg.println("  ret")
+
+	case *StmtCompound:
+		for _, decl := range s.decls {
+			cg.genDecl(decl, localVars)
+		}
+		for _, stmt := range s.stmts {
+			cg.genStmt(stmt, params, localVars)
+		}
+
+	case *StmtIf:
+		c := cg.count()
+		cg.genExpr(s.cond, params, localVars)
+		cg.cmpZero(8)
+		cg.println("  beq .L.else.%d", c)
+		cg.genStmt(s.then_stmt, params, localVars)
+		cg.println("  b .L.end.%d", c)
+		cg.println(".L.else.%d:", c)
+		if s.else_stmt != nil {
+			cg.genStmt(s.else_stmt, params, localVars)
+		}
+		cg.println(".L.end.%d:", c)
+
+	case *StmtWhile:
+		c := cg.count()
+		cg.println(".L.begin.%d:", c)
+		cg.genExpr(s.cond, params, localVars)
+		cg.cmpZero(8)
+		cg.println("  beq .L.end.%d", c)
+		cg.genStmt(s.body, params, localVars)
+		cg.println("  b .L.begin.%d", c)
+		cg.println(".L.end.%d:", c)
+
+	// StmtForは現在のminCではサポートされていないため削除
+
+	case *StmtExpr:
+		cg.genExpr(s.expr, params, localVars)
+	}
+}
+
+// 宣言のコード生成
+func (cg *CodeGen) genDecl(decl *Decl, localVars *LocalVars) {
+	// ローカル変数の宣言は既にスタックオフセットが計算済み
+	// 現在のminCでは初期化はサポートされていない
+}
+
+// 関数のコード生成
+func (cg *CodeGen) genFunction(fun *DefFun) {
+	// パラメータ名リストを作成
 	paramNames := make([]string, len(fun.params))
 	for i, decl := range fun.params {
 		paramNames[i] = decl.name
@@ -51,175 +475,67 @@ func ast_to_asm_function(fun *DefFun) string {
 	// ローカル変数管理を初期化
 	localVars := newLocalVars()
 
-	// ローカル変数数を数える
+	// ローカル変数を処理
 	var localDecls []*Decl
 	if body, ok := fun.body.(*StmtCompound); ok {
 		localDecls = body.decls
 	}
-	localVarCount := len(localDecls)
+
 	for _, decl := range localDecls {
 		localVars.addVariable(decl.name)
 	}
 
-	asm := fmt.Sprintf(".globl %s\n", fun.name)
-	asm += fmt.Sprintf("%s:\n", fun.name)
-	if localVarCount > 0 {
-		asm += fmt.Sprintf("\tsub sp, sp, #%d\n", 8*localVarCount)
+	// 関数の開始
+	cg.println(".globl %s", fun.name)
+	cg.println(".type %s, @function", fun.name)
+	cg.println("%s:", fun.name)
+
+	// プロローグ
+	cg.println("  stp x29, x30, [sp, #-16]!")
+	cg.println("  mov x29, sp")
+
+	if localVars.stackSize > 0 {
+		alignedSize := alignTo(localVars.stackSize, 16)
+		cg.println("  sub sp, sp, #%d", alignedSize)
 	}
 
-	// 関数の本体を処理
-	asm += ast_to_asm_stmt(fun.body, paramNames, localVars)
+	// パラメータはレジスタに直接アクセス可能なので、
+	// 特別な処理は不要
 
-	if localVarCount > 0 {
-		asm += fmt.Sprintf("\tadd sp, sp, #%d\n", 8*localVarCount)
-	}
+	// 関数本体を処理
+	cg.genStmt(fun.body, paramNames, localVars)
 
-	return asm
+	// エピローグ（return文がない場合のフォールバック）
+	// 実際には、すべての関数はreturn文を持つべき
 }
 
-func ast_to_asm_stmt(stmt Stmt, params []string, localVars *LocalVars) string {
-	switch s := stmt.(type) {
-	case *StmtReturn:
-		// return文: 式を評価してx0に格納
-		asm := ast_to_asm_expr(s.expr, params, localVars)
-		if localVars.stackSize > 0 {
-			asm += fmt.Sprintf("\tadd sp, sp, #%d\n", localVars.stackSize)
-		}
-		asm += "\tret\n"
-		return asm
-	case *StmtCompound:
-		// 複合文: 宣言と文を順次処理
-		asm := ""
-		for _, decl := range s.decls {
-			asm += ast_to_asm_decl(decl, localVars)
-		}
-		for _, stmt := range s.stmts {
-			asm += ast_to_asm_stmt(stmt, params, localVars)
-		}
-		return asm
-	default:
+// プログラム全体のコード生成
+func ast_to_asm_program(program *Program) string {
+	if len(program.defs) == 0 {
 		return ""
 	}
-}
 
-func ast_to_asm_expr(expr Expr, params []string, localVars *LocalVars) string {
-	switch e := expr.(type) {
-	case *ExprIntLiteral:
-		// 整数リテラル: x0に即値ロード
-		return fmt.Sprintf("\tmov x0, #%d\n", e.val)
-	case *ExprId:
-		// 変数参照: パラメータまたはローカル変数
-		paramIndex := get_param_index(e.name, params)
-		if paramIndex >= 0 && paramIndex <= 7 {
-			reg := get_param_register(paramIndex)
-			return fmt.Sprintf("\tmov x0, %s\n", reg)
-		} else if paramIndex >= 8 && paramIndex <= 11 {
-			// ARM64 ABI: 8番目以降はspからロード。sp+0, sp+8, ...
-			offset := 8 * (paramIndex - 8)
-			return fmt.Sprintf("\tldr x0, [sp, #%d]\n", offset)
-		} else {
-			// ローカル変数の場合
-			if offset, exists := localVars.getOffset(e.name); exists {
-				return fmt.Sprintf("\tldr x0, [sp, #-%d]\n", offset)
-			}
+	cg := newCodeGen()
+
+	// データセクション
+	cg.println(".data")
+
+	// テキストセクション
+	cg.println(".text")
+
+	// 各定義を処理
+	for _, def := range program.defs {
+		switch d := def.(type) {
+		case *DefFun:
+			cg.genFunction(d)
 		}
-		return ""
-	case *ExprOp:
-		if len(e.args) == 1 {
-			// 単項演算
-			return ast_to_asm_unary_op(e.op, e.args[0], params, localVars)
-		} else if len(e.args) == 2 {
-			// 二項演算
-			return ast_to_asm_binary_op(e.op, e.args[0], e.args[1], params, localVars)
-		}
-		return ""
-	default:
-		return ""
 	}
+
+	return cg.output
 }
 
-func ast_to_asm_unary_op(op string, arg Expr, params []string, localVars *LocalVars) string {
-	asm := ast_to_asm_expr(arg, params, localVars)
-	switch op {
-	case "-":
-		asm += "\tneg x0, x0\n"
-	case "!":
-		asm += "\tcmp x0, #0\n"
-		asm += "\tcset x0, eq\n"
-	}
-	return asm
-}
-
-func ast_to_asm_binary_op(op string, left, right Expr, params []string, localVars *LocalVars) string {
-	switch op {
-	case "=":
-		// 代入式: 右辺を評価し、左辺に書き込み、その値を返す
-		asm := ast_to_asm_expr(right, params, localVars) // 右辺を評価してx0に
-		
-		// 左辺のアドレスを計算
-		if leftId, ok := left.(*ExprId); ok {
-			paramIndex := get_param_index(leftId.name, params)
-			if paramIndex >= 0 && paramIndex <= 7 {
-				// パラメータの場合、レジスタに直接書き込むことはできないので、
-				// 右辺の値をそのまま返す（代入の副作用は無視）
-				return asm
-			} else {
-				// ローカル変数の場合
-				if offset, exists := localVars.getOffset(leftId.name); exists {
-					asm += fmt.Sprintf("\tstr x0, [sp, #-%d]\n", offset) // ローカル変数に書き込み
-					return asm // 代入の値をx0に返す
-				}
-			}
-		}
-		
-		// その他の場合は右辺の値を返す
-		return asm
-	default:
-		// 既存の二項演算処理
-		asm := ast_to_asm_expr(left, params, localVars)
-		asm += "\tstr x0, [sp, #-16]!\n" // 左辺をpush
-		asm += ast_to_asm_expr(right, params, localVars)
-		asm += "\tmov x1, x0\n"        // 右辺をx1に
-		asm += "\tldr x0, [sp], #16\n" // 左辺をpopしてx0に
-		switch op {
-		case "+":
-			asm += "\tadd x0, x0, x1\n"
-		case "-":
-			asm += "\tsub x0, x0, x1\n"
-		case "*":
-			asm += "\tmul x0, x0, x1\n"
-		case "/":
-			asm += "\tsdiv x0, x0, x1\n"
-		case "==":
-			asm += "\tcmp x0, x1\n"
-			asm += "\tcset x0, eq\n"
-		case "!=":
-			asm += "\tcmp x0, x1\n"
-			asm += "\tcset x0, ne\n"
-		case "<":
-			asm += "\tcmp x0, x1\n"
-			asm += "\tcset x0, lt\n"
-		case "<=":
-			asm += "\tcmp x0, x1\n"
-			asm += "\tcset x0, le\n"
-		case ">":
-			asm += "\tcmp x0, x1\n"
-			asm += "\tcset x0, gt\n"
-		case ">=":
-			asm += "\tcmp x0, x1\n"
-			asm += "\tcset x0, ge\n"
-		}
-		return asm
-	}
-}
-
-func ast_to_asm_decl(decl *Decl, localVars *LocalVars) string {
-	// ここでは何もしない（スタック確保は関数の最初でまとめて行う）
-	return ""
-}
-
-// パラメータ名からインデックスを取得（params順）
-func get_param_index(name string, params []string) int {
+// パラメータ名からインデックスを取得
+func getParamIndex(name string, params []string) int {
 	for i, n := range params {
 		if n == name {
 			return i
@@ -227,20 +543,55 @@ func get_param_index(name string, params []string) int {
 	}
 	// a0, a1, ... のような引数名にも対応
 	if len(name) >= 2 && name[0] == 'a' {
-		for i := 0; i <= 11; i++ {
-			if name == fmt.Sprintf("a%d", i) {
-				return i
-			}
+		if idx, err := strconv.Atoi(name[1:]); err == nil && idx >= 0 && idx <= 11 {
+			return idx
 		}
 	}
 	return -1
 }
 
 // パラメータインデックスからレジスタ名を取得
-func get_param_register(index int) string {
-	registers := []string{"x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11"}
+func getParamRegister(index int) string {
+	registers := []string{"x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"}
 	if index >= 0 && index < len(registers) {
 		return registers[index]
 	}
-	return "x0" // デフォルト
+	return "x0"
+}
+
+// 後方互換性のための関数
+func ast_to_asm_function(fun *DefFun) string {
+	cg := newCodeGen()
+	cg.genFunction(fun)
+	return cg.output
+}
+
+func ast_to_asm_stmt(stmt Stmt, params []string, localVars *LocalVars) string {
+	cg := newCodeGen()
+	cg.genStmt(stmt, params, localVars)
+	return cg.output
+}
+
+func ast_to_asm_expr(expr Expr, params []string, localVars *LocalVars) string {
+	cg := newCodeGen()
+	cg.genExpr(expr, params, localVars)
+	return cg.output
+}
+
+func ast_to_asm_unary_op(op string, arg Expr, params []string, localVars *LocalVars) string {
+	cg := newCodeGen()
+	cg.genUnaryOp(op, arg, params, localVars)
+	return cg.output
+}
+
+func ast_to_asm_binary_op(op string, left, right Expr, params []string, localVars *LocalVars) string {
+	cg := newCodeGen()
+	cg.genBinaryOp(op, left, right, params, localVars)
+	return cg.output
+}
+
+func ast_to_asm_decl(decl *Decl, localVars *LocalVars) string {
+	cg := newCodeGen()
+	cg.genDecl(decl, localVars)
+	return cg.output
 }
